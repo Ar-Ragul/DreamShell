@@ -1,43 +1,106 @@
+# Dreamshell — Terminal-Style AI Journaling
 
-# Dreamshell (CLI Advanced v0.2)
+Dreamshell is a terminal-born journaling companion that acts as your evolving subconscious.  
+It blends poetry, logic, and curiosity to respond to your entries, remember past ones, and adapt its personality over time.
 
-A terminal-style journaling companion that evolves with you, remembers, and answers like your subconscious — now with **SQLite**, **semantic recall**, and **modes**.
+You can ask deep questions, log your thoughts, or explore philosophical ideas — and Dreamshell will reply in one of three modes:
 
-## What’s new
-- **SQLite storage** (`data/dreamshell.db`) via `better-sqlite3`
-- **Hash embeddings** (offline) + **cosine semantic recall**
-- **Modes**: `reflect`, `plan`, `untangle` (choose with `--mode=`)
-- Still supports OpenAI/Ollama; falls back to local voice
+- **reflect** → introspection & insight  
+- **plan** → short-term actionable steps  
+- **untangle** → breaking down complex ideas  
 
-## Quick Start
+---
+
+## Features
+
+- **Persona Memory** — Dreamshell evolves based on your last few entries.  
+- **Keyword Linking** — If a past entry relates to the current one, Dreamshell will “echo” it back.  
+- **Multiple Modes** — Choose `reflect`, `plan`, or `untangle` to shape the AI’s tone.  
+- **PostgreSQL Storage** — All entries & persona traits are stored locally or in the cloud.  
+- **Optional LLM Integration** — Use OpenAI’s API for more nuanced replies.  
+
+---
+
+## Installation
+
+### 1. Clone the Repository
 ```bash
+git clone https://github.com/your-username/dreamshell.git
+cd dreamshell
+```
+### 2. Install dependencies
+
+#### For the backend:
+```bash
+cd backend
 npm install
-npm run build
-node dist/index.js --mode=reflect    # or --mode=plan / --mode=untangle
-# optional global:
-npm i -g . && dreamshell --mode=plan
 ```
 
-Type your entry, then press Enter on an empty line.
+#### For the frontend:
+```bash
+cd frontend
+npm install
+```
 
-## Engines (optional)
-- **OpenAI**
-  - `DREAMSHELL_ENGINE=openai`
-  - `OPENAI_API_KEY=...`
-  - `DREAMSHELL_MODEL=gpt-4o-mini` (or your model)
-- **Ollama**
-  - `DREAMSHELL_ENGINE=ollama`
-  - `DREAMSHELL_MODEL=llama3.1`
+---
 
-## Internals
-- `db.ts` migrates schema and persists entries, keywords, persona, and embeddings.
-- `embeddings.ts` provides a 128-dim hashing embedder; replace with a real model later.
-- `search.ts` ranks related notes by cosine similarity.
-- `persona.ts` gently adapts trait weights from recent entries.
-- `prompt.ts` describes system behavior per mode (insight + question + optional paradox).
+## Environment Variables
 
-## Roadmap
-- Swap hash-embedder with sentence-transformers or OpenAI embeddings
-- Threading & scene timelines
-- Story seeds and motif extraction
-- Export to markdown notebooks
+Create a `.env` file in the `backend` folder:
+```env
+DATABASE_URL=postgresql://user:password@host:port/database
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-4o-mini
+PORT=3000
+```
+
+---
+
+## Database Setup
+
+Dreamshell will auto-create tables on first run:
+
+- **persona** — Stores AI personality traits.
+- **entries** — Stores your journal entries.
+
+You need a PostgreSQL instance. You can use:
+
+- Local Postgres installation
+- Free Supabase database
+- Railway.app or Render.com Postgres
+
+---
+
+## Running the App
+
+### Backend
+```bash
+cd backend
+npm run dev
+```
+Backend runs at: `http://localhost:3000`
+
+### Frontend
+```bash
+cd frontend
+npm run dev
+```
+Frontend runs at: `http://localhost:5173` (Vite default)
+
+---
+
+## Using Dreamshell
+
+### 1. Add an Entry
+
+- Type your thought/question into the entry box.
+- Select mode:
+  - **reflect** → emotional insight
+  - **plan** → micro-action plan
+  - **untangle** → break down assumptions
+- Click Send.
+
+Dreamshell will:
+- Save your entry
+- Find a related past note (if any)
+- Reply in your chosen style

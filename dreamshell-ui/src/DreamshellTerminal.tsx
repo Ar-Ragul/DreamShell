@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Cpu, Sparkles, HelpCircle, Brain, Rocket, HelpingHand, type LucideIcon, Gauge, History, Settings, Terminal } from "lucide-react";
+import { Cpu, Sparkles, HelpCircle, Rocket, HelpingHand, type LucideIcon, Gauge, Terminal } from "lucide-react";
 
 /* ===================== API CLIENT ===================== */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
@@ -210,34 +210,66 @@ export default function DreamshellTerminal() {
     if (!trimmed) return;
 
     // Optimistic user log (for same design/flow)
-    const id = state.nextId;
-    setLog(prev => ([...prev, { role: 'user', text: trimmed, id: `u-${id}` }]));
+    const tempId = `${state.nextId}`;
+    setLog(prev => ([...prev, { role: 'user', text: trimmed, id: `u-${tempId}` }]));
     setInput("");
 
+    // --- SSE streaming reply ---
     try {
-      // Store on backend (also evolves persona server-side)
-      const resp = await apiPost<{ entry:{ id:number; ts:string; text:string; sentiment:number; keywords:string[] }, persona:{ version:number; traits:Traits; lastUpdated:string } }>('/entry', { text: trimmed });
+      const params = new URLSearchParams({ text: trimmed, mode });
+      const url = `${API_BASE}/entry/stream?${params.toString()}`;
+      const es = new EventSource(url);
 
-      const newEntry: Entry = {
-        id: resp.entry.id,
-        timestamp: resp.entry.ts,
-        text: resp.entry.text,
-        keywords: resp.entry.keywords || extractKeywords(resp.entry.text),
-        sentiment: resp.entry.sentiment ?? naiveSentiment(resp.entry.text),
-      };
+      let shellId = `s-${tempId}`;
+      let createdShell = false;
 
-      // Related + reply generated locally (keeps design/voice)
-      const rel = related([newEntry, ...state.entries], trimmed, 3).filter(e => e.id !== newEntry.id);
-      const reply = localReply({ version: resp.persona.version, traits: resp.persona.traits, lastUpdated: resp.persona.lastUpdated }, newEntry, rel, mode);
+      es.addEventListener('meta', (ev) => {
+        // ensure a shell bubble exists
+        if (!createdShell) {
+          createdShell = true;
+          setLog(prev => ([...prev, { role: 'shell', text: '', id: shellId }]));
+        }
+        // Optionally update persona and entries from server meta
+        try {
+          const meta = JSON.parse((ev as MessageEvent).data as string);
+          const entry = meta.entry as { id:number; ts:string; text:string; sentiment:number; keywords:string[] };
+          const p = meta.persona as { version:number; traits:Traits; last_updated:string } | { version:number; traits:Traits; lastUpdated:string };
 
-      setState(s => ({
-        entries: [newEntry, ...s.entries],
-        nextId: newEntry.id + 1,
-        persona: { version: resp.persona.version, traits: resp.persona.traits, lastUpdated: resp.persona.lastUpdated },
-      }));
-      setLog(prev => ([...prev, { role: 'shell', text: reply, id: `s-${newEntry.id}` }]));
+          const newEntry: Entry = {
+            id: entry.id,
+            timestamp: entry.ts,
+            text: entry.text,
+            keywords: entry.keywords || extractKeywords(entry.text),
+            sentiment: entry.sentiment ?? naiveSentiment(entry.text),
+          };
+
+          setState(s => ({
+            entries: [newEntry, ...s.entries],
+            nextId: newEntry.id + 1,
+            persona: {
+              version: (p as any).version,
+              traits: (p as any).traits,
+              lastUpdated: ((p as any).lastUpdated ?? (p as any).last_updated) as string,
+            },
+          }));
+        } catch { /* ignore parse issues */ }
+      });
+
+      es.addEventListener('delta', (ev) => {
+        const { data } = ev as MessageEvent;
+        setLog(prev => prev.map(item => item.id === shellId ? { ...item, text: item.text + data } : item));
+      });
+
+      es.addEventListener('end', () => {
+        es.close();
+      });
+
+      es.addEventListener('error', () => {
+        es.close();
+      });
     } catch (e) {
-      // Fallback to purely local behavior if API fails (design unchanged)
+      // Fallback to purely local behavior if SSE fails (design unchanged)
+      const id = state.nextId;
       const timestamp = new Date().toISOString();
       const keywords = extractKeywords(trimmed);
       const sentiment = naiveSentiment(trimmed);
@@ -302,9 +334,7 @@ export default function DreamshellTerminal() {
                   className={`rounded-2xl p-4 shadow-sm border ${item.role==='user' ? 'bg-white/5 border-white/10' : 'bg-white/10 border-white/20'}`}
                 >
                   <div className="text-xs uppercase tracking-wider opacity-60 mb-2">{item.role === 'user' ? 'you' : 'dreamshell'}</div>
-                  <div className="text-[10px] opacity-50">
-    {new Date().toLocaleTimeString()}
-  </div>
+                  <div className="text-[10px] opacity-50">{new Date().toLocaleTimeString()}</div>
                   <pre className="whitespace-pre-wrap leading-relaxed font-mono text-sm">{item.text}</pre>
                 </motion.div>
               ))}
@@ -319,7 +349,6 @@ export default function DreamshellTerminal() {
               <textarea
                 value={input}
                 onChange={e=>setInput(e.target.value)}
-                // placeholder="Type your entry. Press Ctrl+Enter to submit."
                 className="flex-1 bg-black/60 border border-white/15 rounded-2xl p-3 outline-none focus:ring-2 focus:ring-white/30 font-mono text-sm min-h-[80px]"
                 autoFocus
                 onKeyDown={(e)=>{
