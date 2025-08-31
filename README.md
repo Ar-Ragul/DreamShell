@@ -3,6 +3,7 @@
 Dreamshell is a terminal-born journaling companion that acts as your evolving subconscious.  
 It blends poetry, logic, and curiosity to respond to your entries, remember past ones, and adapt its personality over time.
 
+
 You can ask deep questions, log your thoughts, or explore philosophical ideas — and Dreamshell will reply in one of three modes:
 
 - **reflect** → introspection & insight  
@@ -104,3 +105,19 @@ Dreamshell will:
 - Save your entry
 - Find a related past note (if any)
 - Reply in your chosen style
+
+# MVP
+User system
+Register, login, JWT auth, forgot/reset password → ✔ secure baseline.
+
+Database
+PostgreSQL (Neon) integrated, schema for users, persona, entries.
+
+AI-powered journaling
+Streaming LLM replies with modes (reflect, plan, untangle).
+
+Frontend
+Clean login/signup UI, terminal-style journaling interface.
+
+Security basics
+JWT + token storage + protected routes.
