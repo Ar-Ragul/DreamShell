@@ -1,17 +1,38 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Cpu, Sparkles, HelpCircle, Rocket, HelpingHand, type LucideIcon, Gauge, Terminal } from "lucide-react";
+import { Cpu, Sparkles, HelpCircle, Rocket, HelpingHand, type LucideIcon, Gauge, Terminal, LogOut } from "lucide-react";
+
+/* ===================== AUTH HELPERS (inline) ===================== */
+const TOKEN_KEY = "dreamshell_jwt";
+const SCOPE_KEY = "dreamshell_token_scope"; // "local" | "session"
+
+function getToken(): string | null {
+  const scope = localStorage.getItem(SCOPE_KEY);
+  if (scope === "session") return sessionStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+}
+function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(SCOPE_KEY);
+}
+async function authFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(input, { ...init, headers });
+}
 
 /* ===================== API CLIENT ===================== */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
 
 async function apiGet<T>(path: string): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`);
+  const r = await authFetch(`${API_BASE}${path}`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 async function apiPost<T>(path: string, data: unknown): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, {
+  const r = await authFetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -161,7 +182,6 @@ export default function DreamshellTerminal() {
   const [input, setInput] = useState("");
   const [log, setLog] = useState<{ role: 'user'|'shell'; text: string; id: string }[]>([]);
 
-  // keep original state shape to preserve design bindings
   const [state, setState] = useState<{ entries: Entry[]; persona: Persona; nextId: number }>(() => ({
     entries: [],
     nextId: 1,
@@ -185,7 +205,6 @@ export default function DreamshellTerminal() {
           apiGet<{ id:number; version:number; traits:Traits; lastUpdated:string }>('/persona'),
           apiGet<Array<{ id:number; ts:string; text:string; sentiment:number; keywords:string[] }>>('/entries?limit=100'),
         ]);
-        // map API -> UI Entry
         const mapped: Entry[] = list.map(e => ({
           id: e.id,
           timestamp: e.ts,
@@ -199,7 +218,6 @@ export default function DreamshellTerminal() {
           persona: { version: p.version, traits: p.traits, lastUpdated: p.lastUpdated },
         }));
       } catch (e) {
-        // if backend not available, keep empty state (UI still works)
         console.warn('Backend not reachable yet:', e);
       }
     })();
@@ -209,14 +227,14 @@ export default function DreamshellTerminal() {
     const trimmed = input.trim();
     if (!trimmed) return;
 
-    // Optimistic user log (for same design/flow)
     const tempId = `${state.nextId}`;
     setLog(prev => ([...prev, { role: 'user', text: trimmed, id: `u-${tempId}` }]));
     setInput("");
 
-    // --- SSE streaming reply ---
     try {
-      const params = new URLSearchParams({ text: trimmed, mode });
+      // SSE needs token in query (EventSource can't set headers)
+      const token = getToken() || "";
+      const params = new URLSearchParams({ text: trimmed, mode, token });
       const url = `${API_BASE}/entry/stream?${params.toString()}`;
       const es = new EventSource(url);
 
@@ -224,16 +242,14 @@ export default function DreamshellTerminal() {
       let createdShell = false;
 
       es.addEventListener('meta', (ev) => {
-        // ensure a shell bubble exists
         if (!createdShell) {
           createdShell = true;
           setLog(prev => ([...prev, { role: 'shell', text: '', id: shellId }]));
         }
-        // Optionally update persona and entries from server meta
         try {
           const meta = JSON.parse((ev as MessageEvent).data as string);
           const entry = meta.entry as { id:number; ts:string; text:string; sentiment:number; keywords:string[] };
-          const p = meta.persona as { version:number; traits:Traits; last_updated:string } | { version:number; traits:Traits; lastUpdated:string };
+          const p = meta.persona as { version:number; traits:Traits; last_updated?:string; lastUpdated?:string };
 
           const newEntry: Entry = {
             id: entry.id,
@@ -247,12 +263,12 @@ export default function DreamshellTerminal() {
             entries: [newEntry, ...s.entries],
             nextId: newEntry.id + 1,
             persona: {
-              version: (p as any).version,
-              traits: (p as any).traits,
-              lastUpdated: ((p as any).lastUpdated ?? (p as any).last_updated) as string,
+              version: p.version,
+              traits: p.traits,
+              lastUpdated: (p.lastUpdated ?? p.last_updated) as string,
             },
           }));
-        } catch { /* ignore parse issues */ }
+        } catch { /* ignore */ }
       });
 
       es.addEventListener('delta', (ev) => {
@@ -260,15 +276,10 @@ export default function DreamshellTerminal() {
         setLog(prev => prev.map(item => item.id === shellId ? { ...item, text: item.text + data } : item));
       });
 
-      es.addEventListener('end', () => {
-        es.close();
-      });
-
-      es.addEventListener('error', () => {
-        es.close();
-      });
+      es.addEventListener('end', () => es.close());
+      es.addEventListener('error', () => es.close());
     } catch (e) {
-      // Fallback to purely local behavior if SSE fails (design unchanged)
+      // Local fallback
       const id = state.nextId;
       const timestamp = new Date().toISOString();
       const keywords = extractKeywords(trimmed);
@@ -281,6 +292,13 @@ export default function DreamshellTerminal() {
       setLog(prev => ([...prev, { role: 'shell', text: reply, id: `s-${id}` }]));
     }
   }
+
+  const handleLogout = () => {
+    clearToken();
+    // optional: clear UI state too
+    // setState({ entries: [], nextId: 1, persona: state.persona });
+    location.reload(); // simplest to reset auth + refetch guarded data
+  };
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-zinc-900 via-black to-zinc-950 text-white flex">
@@ -315,6 +333,13 @@ export default function DreamshellTerminal() {
             {(["reflect","plan","untangle"] as Mode[]).map(m => (
               <ModePill key={m} m={m} active={m===mode} onClick={()=>setMode(m)} />
             ))}
+            <button
+              onClick={handleLogout}
+              className="ml-2 inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm border border-white/40 text-white/80 hover:bg-white/10"
+              title="Sign out"
+            >
+              <LogOut size={14}/> logout
+            </button>
           </div>
         </header>
 

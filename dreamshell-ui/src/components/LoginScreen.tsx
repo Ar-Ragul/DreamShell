@@ -114,12 +114,14 @@ export function LoginScreen({ onForgotPassword, onSignUp, onLoggedIn }: LoginScr
             )}
 
             <Button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-white text-black hover:bg-zinc-200 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-            >
-              {loading ? "Signing in…" : "Sign In"}
-            </Button>
+  type="submit"
+  disabled={loading}
+  className={`w-full bg-white text-black hover:bg-zinc-200 transition-colors ${
+    loading ? "opacity-60 cursor-not-allowed" : ""
+  }`}
+>
+  {loading ? "Signing in…" : "Sign In"}
+</Button>
           </form>
 
           <div className="text-center text-sm text-zinc-400">

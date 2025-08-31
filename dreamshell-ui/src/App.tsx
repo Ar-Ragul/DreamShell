@@ -1,30 +1,41 @@
+// src/App.tsx
 import { useState } from "react";
+import Protected from "./components/Protected";
 import { LoginScreen } from "./components/LoginScreen";
 import { SignUpScreen } from "./components/SignUpScreen";
-import { ForgotPasswordScreen } from "./components/ForgotPasswordScreen";
-import './index.css';
+import DreamshellTerminal from "./DreamshellTerminal";
+import { useAuth } from "./hooks/useAuth";
 
-type AuthScreen = "login" | "signup" | "forgot-password";
+type View = "login" | "signup" | "terminal";
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<AuthScreen>("login");
+  const [view, setView] = useState<View>("login");
+  const { user } = useAuth();
 
-  const showLogin = () => setCurrentScreen("login");
-  const showSignUp = () => setCurrentScreen("signup");
-  const showForgotPassword = () => setCurrentScreen("forgot-password");
+  if (user && view !== "terminal") setView("terminal");
 
-  switch (currentScreen) {
-    case "signup":
-      return <SignUpScreen onBackToLogin={showLogin} />;
-    case "forgot-password":
-      return <ForgotPasswordScreen onBackToLogin={showLogin} />;
-    default:
-      return (
-        <LoginScreen 
-          onForgotPassword={showForgotPassword} 
-          onSignUp={showSignUp} 
-        />
-        
-      );
+  if (view === "signup") {
+    return (
+      <SignUpScreen
+        onBackToLogin={() => setView("login")}
+        onRegistered={() => setView("login")}
+      />
+    );
   }
+
+  if (view === "login" && !user) {
+    return (
+      <LoginScreen
+        onSignUp={() => setView("signup")}
+        onForgotPassword={() => alert("TODO: open forgot password screen")}
+        onLoggedIn={() => setView("terminal")}
+      />
+    );
+  }
+
+  return (
+    <Protected>
+      <DreamshellTerminal />
+    </Protected>
+  );
 }

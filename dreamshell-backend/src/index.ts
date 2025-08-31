@@ -2,6 +2,10 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { Pool } from 'pg';
+import {
+  issueToken, authRequired, hashPassword, verifyPassword,
+  makeToken, sendMail, ensurePersonaFor
+} from './auth';
 
 const app = express();
 app.use(cors());
@@ -73,33 +77,27 @@ ${mode==='reflect'?'Name the feeling. Name the fact. Name the next tiny step.'
   return null;
 }
 
-// ---------- tables & seed ----------
+// ---------- tables (no global persona seed) ----------
 async function ensureTables() {
   await pool.query(`
     create table if not exists persona (
-      id integer primary key default 1,
+      -- one row per user; user_id unique
+      id integer not null default 1,
       version integer not null default 1,
       traits jsonb not null,
-      last_updated timestamptz not null
+      last_updated timestamptz not null,
+      user_id uuid unique references users(id) on delete cascade
     );
     create table if not exists entries (
       id serial primary key,
       ts timestamptz not null,
       text text not null,
       sentiment real not null default 0,
-      keywords jsonb not null default '[]'::jsonb
+      keywords jsonb not null default '[]'::jsonb,
+      user_id uuid references users(id) on delete cascade
     );
+    create index if not exists idx_entries_user_ts on entries(user_id, ts desc);
   `);
-
-  const r = await pool.query(`select count(*)::int as n from persona where id=1`);
-  if (r.rows[0].n === 0) {
-    const now = new Date().toISOString();
-    const traits = { curiosity: 0.6, empathy: 0.7, rigor: 0.6, mystique: 0.7, challengeRate: 0.35 };
-    await pool.query(
-      `insert into persona (id, version, traits, last_updated) values (1, 1, $1::jsonb, $2::timestamptz)`,
-      [JSON.stringify(traits), now]
-    );
-  }
 }
 
 // ---------- NLP helpers ----------
@@ -125,7 +123,7 @@ function naiveSentiment(text: string): number {
   return Math.max(-1, Math.min(1, score / 3));
 }
 
-// ---------- persona evolution ----------
+// ---------- persona evolution (per-user) ----------
 const EMOTION_WORDS: Record<string, string[]> = {
   wonder: ['why','how','mystery','infinite','star','time','cosmos','quantum','paradox','entropy'],
   care:   ['friend','family','love','help','care','hug','kind','support','listen','safe'],
@@ -135,9 +133,14 @@ const EMOTION_WORDS: Record<string, string[]> = {
 function mix(a:number,b:number,t:number){ return a*(1-t)+b*t; }
 function clamp(x:number,lo=0,hi=1){ return Math.max(lo, Math.min(hi, x)); }
 
-async function evolvePersona() {
+async function evolvePersonaForUser(userId: string) {
   const recent = await pool.query(
-    `select id, text, sentiment from entries order by id desc limit 7`
+    `SELECT id, text, sentiment
+       FROM entries
+      WHERE user_id=$1
+      ORDER BY id DESC
+      LIMIT 7`,
+    [userId]
   );
   const score: any = { wonder:0, care:0, rigor:0, gloom:0 };
   for (const e of recent.rows) {
@@ -150,9 +153,13 @@ async function evolvePersona() {
   const total = Math.max(1, score.wonder + score.care + score.rigor + score.gloom);
   const w = score.wonder/total, c = score.care/total, r = score.rigor/total, g = score.gloom/total;
 
-  const pr = await pool.query(`select version, traits, last_updated from persona where id=1`);
+  const pr = await pool.query(
+    `SELECT version, traits, last_updated FROM persona WHERE user_id=$1`,
+    [userId]
+  );
   const p = pr.rows[0];
   const tr = p?.traits ?? { curiosity: 0.6, empathy: 0.7, rigor: 0.6, mystique: 0.7, challengeRate: 0.35 };
+
 
   tr.curiosity = clamp(mix(tr.curiosity, 0.5 + 0.5*w, 0.2));
   tr.empathy   = clamp(mix(tr.empathy,   0.5 + 0.5*c - 0.3*g, 0.25));
@@ -160,40 +167,151 @@ async function evolvePersona() {
   tr.mystique  = clamp(mix(tr.mystique,  0.55 + 0.3*w + 0.15*g, 0.2));
   tr.challengeRate = clamp(mix(tr.challengeRate, 0.25 + 0.4*w + 0.1*r - 0.2*g, 0.15));
 
-  await pool.query(
-    `update persona set traits = $1::jsonb, last_updated = $2::timestamptz where id=1`,
-    [JSON.stringify(tr), new Date().toISOString()]
+   await pool.query(
+    `UPDATE persona
+        SET traits=$2::jsonb, last_updated=$3::timestamptz
+      WHERE user_id=$1`,
+    [userId, JSON.stringify(tr), new Date().toISOString()]
   );
 }
 
-// ---------- Routes (JSON) ----------
+// ---------- Health ----------
 app.get('/health', async (_req, res) => {
   const r = await pool.query('select 1 as ok');
   res.json({ ok: r.rows[0].ok === 1 });
 });
 
-app.get('/persona', async (_req, res) => {
-  await ensureTables();
-  const r = await pool.query(`select id, version, traits, last_updated from persona where id=1`);
+/* ======================= AUTH ======================= */
+
+// REGISTER
+app.post('/auth/register', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email & password required' });
+
+  const exists = await pool.query(`SELECT 1 FROM users WHERE email=$1`, [String(email).toLowerCase()]);
+  if (exists.rowCount) return res.status(400).json({ error: 'email already registered' });
+
+  const pwHash = await hashPassword(String(password));
+  const verifyToken = makeToken();
+  const u = await pool.query(
+    `INSERT INTO users (email, password_hash, verify_token) VALUES ($1, $2, $3)
+     RETURNING id, email`,
+    [String(email).toLowerCase(), pwHash, verifyToken]
+  );
+  await ensurePersonaFor(pool, u.rows[0].id);
+
+  const verifyUrl = `${process.env.APP_BASE_URL || 'http://localhost:5173'}/verify?token=${verifyToken}&email=${encodeURIComponent(email)}`;
+  await sendMail(email, "Verify your Dreamshell account",
+    `<p>Welcome to Dreamshell.</p><p>Verify: <a href="${verifyUrl}">${verifyUrl}</a></p>`);
+
+  const token = issueToken(u.rows[0].id);
+  res.json({ token, needsVerification: true });
+});
+
+// VERIFY
+app.post('/auth/verify', async (req, res) => {
+  const { email, token } = req.body || {};
+  if (!email || !token) return res.status(400).json({ error: 'email & token required' });
+  const r = await pool.query(
+    `UPDATE users SET verified=true, verify_token=NULL WHERE email=$1 AND verify_token=$2 RETURNING id`,
+    [String(email).toLowerCase(), String(token)]
+  );
+  if (!r.rowCount) return res.status(400).json({ error: 'invalid token' });
+  res.json({ ok: true });
+});
+
+// LOGIN
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email & password required' });
+
+  const r = await pool.query(
+    `SELECT id, password_hash, verified FROM users WHERE email=$1`,
+    [String(email).toLowerCase()]
+  );
+  const u = r.rows[0];
+  if (!u) return res.status(401).json({ error: 'invalid credentials' });
+
+  const ok = await verifyPassword(u.password_hash, String(password));
+  if (!ok) return res.status(401).json({ error: 'invalid credentials' });
+
+  const token = issueToken(u.id);
+  res.json({ token, verified: !!u.verified });
+});
+
+// FORGOT (send reset link)
+app.post('/auth/forgot', async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'email required' });
+
+  const resetToken = makeToken();
+  const expires = new Date(Date.now() + 1000 * 60 * 30).toISOString(); // 30m
+  const r = await pool.query(
+    `UPDATE users SET reset_token=$1, reset_expires=$2 WHERE email=$3 RETURNING id`,
+    [resetToken, expires, String(email).toLowerCase()]
+  );
+
+  if (r.rowCount) {
+    const url = `${process.env.APP_BASE_URL || 'http://localhost:5173'}/reset?token=${resetToken}&email=${encodeURIComponent(email)}`;
+    await sendMail(email, "Reset your Dreamshell password",
+      `<p>Reset link (30 minutes): <a href="${url}">${url}</a></p>`);
+  }
+  res.json({ ok: true }); // always OK to avoid user enumeration
+});
+
+// RESET
+app.post('/auth/reset', async (req, res) => {
+  const { email, token, password } = req.body || {};
+  if (!email || !token || !password) return res.status(400).json({ error: 'email, token, password required' });
+
+  const now = new Date().toISOString();
+  const pwHash = await hashPassword(String(password));
+  const r = await pool.query(
+    `UPDATE users
+        SET password_hash=$1, reset_token=NULL, reset_expires=NULL
+      WHERE email=$2 AND reset_token=$3 AND reset_expires > $4
+      RETURNING id`,
+    [pwHash, String(email).toLowerCase(), String(token), now]
+  );
+  if (!r.rowCount) return res.status(400).json({ error: 'invalid or expired token' });
+  res.json({ ok: true });
+});
+
+// ME
+app.get('/auth/me', authRequired(), async (req: any, res) => {
+  const r = await pool.query(`SELECT id, email, verified, created_at FROM users WHERE id=$1`, [req.user.id]);
+  res.json(r.rows[0] || null);
+});
+
+/* ============== JOURNAL (now user-scoped + auth) ============== */
+
+// persona
+app.get('/persona', authRequired(), async (req: any, res) => {
+  const r = await pool.query(
+    `SELECT user_id, version, traits, last_updated FROM persona WHERE user_id=$1`,
+    [req.user.id]
+  );
   res.json(r.rows[0]);
 });
 
-app.get('/entries', async (req, res) => {
-  await ensureTables();
+
+// list entries
+app.get('/entries', authRequired(), async (req: any, res) => {
   const limit = Math.min(Number(req.query.limit || 100), 200);
   const r = await pool.query(
-    `select id, ts, text, sentiment, keywords from entries order by id desc limit $1`,
-    [limit]
+    `SELECT id, ts, text, sentiment, keywords
+       FROM entries
+      WHERE user_id=$1
+      ORDER BY id DESC
+      LIMIT $2`,
+    [req.user.id, limit]
   );
   res.json(r.rows);
 });
 
-app.post('/entry', async (req, res) => {
-  await ensureTables();
+// create entry
+app.post('/entry', authRequired(), async (req: any, res) => {
   const text = String((req.body?.text ?? '')).trim();
-  const useLLM = !!req.body?.useLLM;
-  const mode = (req.body?.mode ?? 'reflect');
-
   if (!text) return res.status(400).json({ error: 'text required' });
 
   const ts = new Date().toISOString();
@@ -201,40 +319,30 @@ app.post('/entry', async (req, res) => {
   const sentiment = naiveSentiment(text);
 
   const ins = await pool.query(
-    `insert into entries (ts, text, sentiment, keywords) values ($1, $2, $3, $4::jsonb)
-     returning id, ts, text, sentiment, keywords`,
-    [ts, text, sentiment, JSON.stringify(keywords)]
+    `INSERT INTO entries (user_id, ts, text, sentiment, keywords)
+     VALUES ($1, $2, $3, $4, $5::jsonb)
+     RETURNING id, ts, text, sentiment, keywords`,
+    [req.user.id, ts, text, sentiment, JSON.stringify(keywords)]
   );
 
+  // related within this user's notes
   const recent = await pool.query(
-    `select id, ts, text, keywords from entries where id <> $1 order by id desc limit 20`,
-    [ins.rows[0].id]
+    `SELECT id, ts, text, keywords
+       FROM entries
+      WHERE user_id=$1 AND id <> $2
+      ORDER BY id DESC
+      LIMIT 20`,
+    [req.user.id, ins.rows[0].id]
   );
-  let best: any = null, bestScore = -1;
-  for (const r of recent.rows) {
-    const score = overlap(keywords, r.keywords || []);
-    if (score > bestScore) { bestScore = score; best = r; }
-  }
 
-  await evolvePersona();
-  const pr = await pool.query(`select id, version, traits, last_updated from persona where id=1`);
+  await evolvePersonaForUser(req.user.id); // change evolve to be per-user (see below)
 
-  let reply: string | null = null;
-  if (useLLM && process.env.OPENAI_API_KEY) {
-    reply = await generateLLMReply({
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      apiKey: process.env.OPENAI_API_KEY,
-      persona: { version: pr.rows[0].version, traits: pr.rows[0].traits, lastUpdated: pr.rows[0].last_updated },
-      current: {
-        id: ins.rows[0].id, ts: ins.rows[0].ts, text: ins.rows[0].text,
-        keywords: ins.rows[0].keywords || [], sentiment: ins.rows[0].sentiment ?? 0
-      },
-      related: best ? { id: best.id, ts: best.ts, text: best.text } : null,
-      mode: mode as 'reflect'|'plan'|'untangle'
-    });
-  }
+  const pr = await pool.query(
+    `SELECT user_id, version, traits, last_updated FROM persona WHERE user_id=$1`,
+    [req.user.id]
+  );
 
-  res.json({ entry: ins.rows[0], persona: pr.rows[0], reply });
+  res.json({ entry: ins.rows[0], persona: pr.rows[0] /*, reply if LLM*/ });
 });
 
 // ---------- SSE helpers (JSON for meta/end/error, TEXT for delta) ----------
@@ -242,7 +350,7 @@ function sseInit(res: express.Response) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // disable proxy buffering
+  res.setHeader('X-Accel-Buffering', 'no');
   // @ts-ignore
   res.flushHeaders?.();
 }
@@ -307,11 +415,12 @@ async function streamLLMReply(opts: {
   }
 }
 
-// ---------- SSE route ----------
-app.get('/entry/stream', async (req, res) => {
+// ---------- SSE route (per user) ----------
+app.get('/entry/stream', authRequired(), async (req: any, res) => {
   try {
     await ensureTables();
 
+    const uid = req.user.id;
     const text = String(req.query.text ?? '').trim();
     const mode = (String(req.query.mode ?? 'reflect') as 'reflect'|'plan'|'untangle');
     if (!text) return res.status(400).end('text required');
@@ -322,15 +431,18 @@ app.get('/entry/stream', async (req, res) => {
     const sentiment = naiveSentiment(text);
 
     const ins = await pool.query(
-      `insert into entries (ts, text, sentiment, keywords) values ($1, $2, $3, $4::jsonb)
+      `insert into entries (ts, text, sentiment, keywords, user_id)
+       values ($1, $2, $3, $4::jsonb, $5)
        returning id, ts, text, sentiment, keywords`,
-      [ts, text, sentiment, JSON.stringify(keywords)]
+      [ts, text, sentiment, JSON.stringify(keywords), uid]
     );
 
-    // naive related
+    // naive related within user
     const recent = await pool.query(
-      `select id, ts, text, keywords from entries where id <> $1 order by id desc limit 20`,
-      [ins.rows[0].id]
+      `select id, ts, text, keywords from entries
+        where user_id=$1 and id <> $2
+        order by id desc limit 20`,
+      [uid, ins.rows[0].id]
     );
     let best: any = null, bestScore = -1;
     for (const r of recent.rows) {
@@ -338,8 +450,8 @@ app.get('/entry/stream', async (req, res) => {
       if (score > bestScore) { bestScore = score; best = r; }
     }
 
-    await evolvePersona();
-    const pr = await pool.query(`select id, version, traits, last_updated from persona where id=1`);
+    await evolvePersonaForUser(uid);
+    const pr = await pool.query(`select version, traits, last_updated from persona where user_id=$1`, [uid]);
 
     // Start SSE
     sseInit(res);
@@ -364,7 +476,7 @@ Rules:
 - If related note exists, add one "Echo from #ID: <snippet>" line at the very top.
 - Keep under 160 words total.`;
 
-    const user = `Current entry (#${ins.rows[0].id} at ${ins.rows[0].ts}):
+    const userMsg = `Current entry (#${ins.rows[0].id} at ${ins.rows[0].ts}):
 ${ins.rows[0].text}
 
 Related past note:
@@ -378,8 +490,8 @@ ${mode==='reflect'?'Name the feeling. Name the fact. Name the next tiny step.'
     await streamLLMReply({
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       apiKey: process.env.OPENAI_API_KEY!,
-      sys, user,
-      onDelta: (chunk) => sseSendText(res, 'delta', chunk), // TEXT, not JSON
+      sys, user: userMsg,
+      onDelta: (chunk) => sseSendText(res, 'delta', chunk),
     });
 
     sseSendJSON(res, 'end', { ok: true });

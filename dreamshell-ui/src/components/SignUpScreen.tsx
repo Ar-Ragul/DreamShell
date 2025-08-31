@@ -1,34 +1,67 @@
+import { useState } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
-import { useState } from "react";
 
 interface SignUpScreenProps {
   onBackToLogin: () => void;
+  onRegistered?: () => void; // optional: called after successful signup
 }
 
-export function SignUpScreen({ onBackToLogin }: SignUpScreenProps) {
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:3000";
+
+export function SignUpScreen({ onBackToLogin, onRegistered }: SignUpScreenProps) {
   const [formData, setFormData] = useState({
     name: "",
     email: "",
     password: "",
-    confirmPassword: ""
+    confirmPassword: "",
   });
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setErr(null);
+
     if (formData.password !== formData.confirmPassword) {
-      alert("Passwords don't match!");
+      setErr("Passwords do not match.");
       return;
     }
-    // Handle sign up logic here
-    console.log("Sign up attempted with:", formData);
-  };
+    if (formData.password.length < 8) {
+      setErr("Password must be at least 8 characters.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // Backend expects { email, password }. Name is optional (not stored yet).
+      const r = await fetch(`${API_BASE}/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: formData.email, password: formData.password }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data?.error || "Registration failed");
+
+      // Save JWT (so user is effectively signed in). You can also redirect to verify.
+      localStorage.setItem("dreamshell_jwt", data.token);
+      localStorage.setItem("dreamshell_token_scope", "local");
+
+      // If backend is emailing a verification link, you can show a success hint.
+      // Here we just call onRegistered or go back to login.
+      onRegistered?.() ?? onBackToLogin();
+    } catch (e: any) {
+      setErr(e.message || "Registration failed");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-zinc-900 via-black to-zinc-950 text-white flex items-center justify-center p-4">
@@ -52,7 +85,6 @@ export function SignUpScreen({ onBackToLogin }: SignUpScreenProps) {
                 value={formData.name}
                 onChange={(e) => handleInputChange("name", e.target.value)}
                 className="bg-zinc-700/50 border-zinc-600 text-white placeholder:text-zinc-400 focus:border-zinc-500"
-                required
               />
             </div>
             <div className="space-y-2">
@@ -67,6 +99,7 @@ export function SignUpScreen({ onBackToLogin }: SignUpScreenProps) {
                 onChange={(e) => handleInputChange("email", e.target.value)}
                 className="bg-zinc-700/50 border-zinc-600 text-white placeholder:text-zinc-400 focus:border-zinc-500"
                 required
+                autoComplete="email"
               />
             </div>
             <div className="space-y-2">
@@ -81,7 +114,9 @@ export function SignUpScreen({ onBackToLogin }: SignUpScreenProps) {
                 onChange={(e) => handleInputChange("password", e.target.value)}
                 className="bg-zinc-700/50 border-zinc-600 text-white placeholder:text-zinc-400 focus:border-zinc-500"
                 required
+                autoComplete="new-password"
               />
+              <p className="text-xs text-zinc-400">Use at least 8 characters.</p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirmPassword" className="text-white">
@@ -95,8 +130,10 @@ export function SignUpScreen({ onBackToLogin }: SignUpScreenProps) {
                 onChange={(e) => handleInputChange("confirmPassword", e.target.value)}
                 className="bg-zinc-700/50 border-zinc-600 text-white placeholder:text-zinc-400 focus:border-zinc-500"
                 required
+                autoComplete="new-password"
               />
             </div>
+
             <div className="flex items-center space-x-2">
               <input
                 type="checkbox"
@@ -115,13 +152,22 @@ export function SignUpScreen({ onBackToLogin }: SignUpScreenProps) {
                 </a>
               </Label>
             </div>
+
+            {err && (
+              <div className="text-sm text-red-400 bg-red-900/20 border border-red-800/40 rounded-md px-3 py-2">
+                {err}
+              </div>
+            )}
+
             <Button
               type="submit"
-              className="w-full bg-white text-black hover:bg-zinc-200 transition-colors"
+              disabled={loading}
+              className="w-full bg-white text-black hover:bg-zinc-200 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              Create Account
+              {loading ? "Creating…" : "Create Account"}
             </Button>
           </form>
+
           <div className="text-center text-sm text-zinc-400">
             Already have an account?{" "}
             <button
