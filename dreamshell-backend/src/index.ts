@@ -18,10 +18,52 @@ const pool = new Pool({
 });
 
 // ---------- tiny utils ----------
-function overlap(a: string[], b: string[]) {
-  const A = new Set(a), B = new Set(b);
-  let n = 0; for (const x of A) if (B.has(x)) n++;
-  return n;
+interface EntryMatch {
+  score: number;
+  keywordMatch: number;
+  sentimentMatch: number;
+  timeRelevance: number;
+}
+
+function calculateEntryMatch(
+  current: { keywords: string[], sentiment: number, ts: string },
+  candidate: { keywords: string[], sentiment: number, ts: string }
+): EntryMatch {
+  // Keyword overlap score (0-1)
+  const A = new Set(current.keywords), B = new Set(candidate.keywords);
+  const keywordMatch = Array.from(A).filter(x => B.has(x)).length / Math.max(A.size, B.size);
+  
+  // Sentiment similarity (0-1)
+  const sentimentMatch = 1 - Math.abs(current.sentiment - candidate.sentiment);
+  
+  // Time relevance (0-1), decreasing with age difference
+  const hoursDiff = Math.abs(
+    (new Date(current.ts).getTime() - new Date(candidate.ts).getTime()) / (1000 * 60 * 60)
+  );
+  const timeRelevance = Math.exp(-hoursDiff / (24 * 7)); // Week-scale decay
+  
+  // Combined score (weighted average)
+  const score = (
+    keywordMatch * 0.5 +    // Keywords are most important
+    sentimentMatch * 0.3 +  // Emotional context matters
+    timeRelevance * 0.2     // Recent entries get a boost
+  );
+  
+  return { score, keywordMatch, sentimentMatch, timeRelevance };
+}
+
+function findRelatedEntries(
+  current: { keywords: string[], sentiment: number, ts: string },
+  candidates: Array<{ id: number, keywords: string[], sentiment: number, ts: string }>,
+  limit = 3
+) {
+  return candidates
+    .map(entry => ({
+      entry,
+      match: calculateEntryMatch(current, entry)
+    }))
+    .sort((a, b) => b.match.score - a.match.score)
+    .slice(0, limit);
 }
 
 // ---------- LLM (non-streaming) ----------
@@ -35,14 +77,24 @@ async function generateLLMReply(opts: {
 }) {
   const { model, apiKey, persona, current, related, mode='reflect' } = opts;
 
-  const sys = `You are Dreamshell — a terminal-born, evolving AI that speaks as the user's subconscious.
-Tone: slightly eerie yet supportive, poetic but precise.
-Traits (0..1): curiosity=${(+persona.traits.curiosity).toFixed(2)}, empathy=${(+persona.traits.empathy).toFixed(2)}, rigor=${(+persona.traits.rigor).toFixed(2)}, mystique=${(+persona.traits.mystique).toFixed(2)}, challenge=${(+persona.traits.challengeRate).toFixed(2)}.
-Mode: ${mode.toUpperCase()}.
-Rules:
-- Output exactly: one concise INSIGHT line, one QUESTION line, and OPTIONAL PARADOX line.
-- If related note exists, add one "Echo from #ID: <snippet>" line at the very top.
-- Keep under 160 words total.`;
+      const sys = `You are Dreamshell, a compassionate AI companion having natural conversations. Speak warmly, as if chatting with a friend. Never use any special formatting, markdown, asterisks, or bullet points.
+
+When responding:
+Start by acknowledging their thoughts and feelings. Then smoothly transition into a gentle suggestion for something they could try today. Follow up with an achievable idea for the week ahead. Paint an inspiring picture of future possibilities. If relevant, casually mention helpful resources or communities. Always end with a thoughtful question that encourages them to reflect or share more.
+
+Keep your responses conversational and flowing naturally from one topic to the next. Use everyday language and short paragraphs. Focus on being supportive and practical while maintaining a warm, friendly tone.
+
+Mode: ${mode.toUpperCase()}
+Response style: Warm, natural conversation
+Format: Plain text only, no special characters or formatting
+
+Response Stats:
+- Expertise: ${(0.6).toFixed(2)}
+- Practicality: ${(0.7).toFixed(2)}
+- Strategy: ${(0.6).toFixed(2)}
+- Execution: ${(0.35).toFixed(2)}
+
+Mode: ${mode.toUpperCase()}.`;
 
   const user = `Current entry (#${current.id} at ${current.ts}):
 ${current.text}
@@ -113,22 +165,95 @@ function extractKeywords(text: string): string[] {
       .filter(w => w.length > 2 && !STOP.has(w))
   )].slice(0, 12);
 }
-const POS = ['love','calm','joy','grateful','hope','progress','win','peace','light','trust','curious'];
-const NEG = ['sad','angry','fear','anxious','lost','tired','hate','fail','pain','dark','stuck'];
-function naiveSentiment(text: string): number {
+const GOAL_STATES = {
+  // Action and Progress
+  action: ['do', 'start', 'begin', 'create', 'make', 'build', 'work', 'implement', 'execute', 'launch'],
+  progress: ['improve', 'grow', 'develop', 'advance', 'achieve', 'complete', 'finish', 'accomplish'],
+  
+  // Learning and Skills
+  learning: ['learn', 'study', 'practice', 'understand', 'master', 'explore', 'research', 'analyze'],
+  skills: ['code', 'program', 'design', 'write', 'teach', 'lead', 'manage', 'solve'],
+  
+  // Planning and Strategy
+  planning: ['plan', 'organize', 'structure', 'prepare', 'arrange', 'schedule', 'coordinate'],
+  goals: ['goal', 'target', 'objective', 'milestone', 'outcome', 'result', 'success'],
+
+  // Mindset and Attitude
+  motivation: ['motivated', 'determined', 'focused', 'committed', 'dedicated', 'passionate'],
+  confidence: ['can', 'will', 'able', 'capable', 'ready', 'confident', 'sure', 'certain'],
+
+  // Challenges and Growth
+  challenges: ['challenge', 'problem', 'obstacle', 'difficulty', 'barrier', 'issue'],
+  growth: ['opportunity', 'potential', 'possibility', 'prospect', 'chance', 'opening']
+};
+
+function analyzeGoalState(text: string): {
+  primaryFocus: string;
+  actionReadiness: number;
+  sentiment: number;
+  topGoals: string[];
+} {
   const t = text.toLowerCase();
-  let score = 0;
-  POS.forEach(p => { if (t.includes(p)) score += 1; });
-  NEG.forEach(n => { if (t.includes(n)) score -= 1; });
-  return Math.max(-1, Math.min(1, score / 3));
+  const scores: Record<string, number> = {};
+  
+  // Calculate state scores
+  Object.entries(GOAL_STATES).forEach(([state, words]) => {
+    scores[state] = words.reduce((score, word) => {
+      const regex = new RegExp(`\\b${word}\\b`, 'gi');
+      const matches = (t.match(regex) || []).length;
+      return score + matches;
+    }, 0);
+  });
+  
+  // Find primary focus area
+  const primaryFocus = Object.entries(scores)
+    .sort(([,a], [,b]) => b - a)[0][0];
+  
+  // Calculate action readiness (0-1)
+  const actionScores = ['action', 'progress', 'planning', 'goals'];
+  const maxActionScore = actionScores.length * 3; // Assuming max 3 matches per category
+  const actionReadiness = Math.min(1, 
+    actionScores.reduce((sum, cat) => sum + (scores[cat] || 0), 0) / maxActionScore
+  );
+  
+  // Calculate sentiment (-1 to 1)
+  const positiveStates = ['progress', 'confidence', 'motivation', 'growth'];
+  const negativeStates = ['challenges', 'uncertainty'];
+  
+  const posScore = positiveStates.reduce((sum, state) => sum + (scores[state] || 0), 0);
+  const negScore = negativeStates.reduce((sum, state) => sum + (scores[state] || 0), 0);
+  
+  const sentiment = Math.max(-1, Math.min(1, (posScore - negScore) / 5));
+  
+  // Identify top goals
+  const topGoals = Object.entries(scores)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 3)
+    .map(([state]) => state);
+  
+  return { primaryFocus, actionReadiness, sentiment, topGoals };
+}
+
+function naiveSentiment(text: string): number {
+  return analyzeGoalState(text).sentiment;
 }
 
 // ---------- persona evolution (per-user) ----------
 const EMOTION_WORDS: Record<string, string[]> = {
-  wonder: ['why','how','mystery','infinite','star','time','cosmos','quantum','paradox','entropy'],
-  care:   ['friend','family','love','help','care','hug','kind','support','listen','safe'],
-  rigor:  ['proof','logic','because','define','evidence','theory','model','axiom','data','test'],
-  gloom:  ['alone','lost','dark','void','fear','anxious','tired','pain','fail','stuck'],
+  // Intellectual curiosity and growth
+  wonder: ['why','how','mystery','learn','discover','explore','curious','understand','insight','reflect'],
+  
+  // Emotional connection and support
+  care: ['friend','family','love','help','care','support','share','connect','trust','gratitude'],
+  
+  // Analytical and structured thinking
+  rigor: ['plan','analyze','decide','solve','build','measure','improve','system','process','goal'],
+  
+  // Emotional challenges and growth areas
+  growth: ['challenge','change','try','better','progress','start','achieve','overcome','adapt','grow'],
+  
+  // Difficult emotions (for empathetic responses)
+  struggle: ['stress','worry','fear','doubt','confused','overwhelm','tired','uncertain','stuck','anxious'],
 };
 function mix(a:number,b:number,t:number){ return a*(1-t)+b*t; }
 function clamp(x:number,lo=0,hi=1){ return Math.max(lo, Math.min(hi, x)); }
@@ -161,11 +286,12 @@ async function evolvePersonaForUser(userId: string) {
   const tr = p?.traits ?? { curiosity: 0.6, empathy: 0.7, rigor: 0.6, mystique: 0.7, challengeRate: 0.35 };
 
 
-  tr.curiosity = clamp(mix(tr.curiosity, 0.5 + 0.5*w, 0.2));
-  tr.empathy   = clamp(mix(tr.empathy,   0.5 + 0.5*c - 0.3*g, 0.25));
-  tr.rigor     = clamp(mix(tr.rigor,     0.5 + 0.5*r, 0.2));
-  tr.mystique  = clamp(mix(tr.mystique,  0.55 + 0.3*w + 0.15*g, 0.2));
-  tr.challengeRate = clamp(mix(tr.challengeRate, 0.25 + 0.4*w + 0.1*r - 0.2*g, 0.15));
+  // Adjust these values to change AI personality
+  tr.curiosity = clamp(mix(tr.curiosity, 0.3 + 0.7*w, 0.2));        // Higher = more questions
+  tr.empathy   = clamp(mix(tr.empathy,   0.6 + 0.4*c - 0.2*g, 0.3)); // Higher = more emotional support
+  tr.rigor     = clamp(mix(tr.rigor,     0.7 + 0.3*r, 0.25));       // Higher = more logical/practical
+  tr.mystique  = clamp(mix(tr.mystique,  0.3 + 0.2*w + 0.1*g, 0.15)); // Lower = less cryptic
+  tr.challengeRate = clamp(mix(tr.challengeRate, 0.4 + 0.3*w + 0.2*r - 0.1*g, 0.2)); // Higher = more direct challenges
 
    await pool.query(
     `UPDATE persona
@@ -444,11 +570,17 @@ app.get('/entry/stream', authRequired(), async (req: any, res) => {
         order by id desc limit 20`,
       [uid, ins.rows[0].id]
     );
-    let best: any = null, bestScore = -1;
-    for (const r of recent.rows) {
-      const score = overlap(keywords, r.keywords || []);
-      if (score > bestScore) { bestScore = score; best = r; }
-    }
+    const related = findRelatedEntries(
+      { keywords, sentiment, ts },
+      recent.rows.map(r => ({
+        id: r.id,
+        keywords: r.keywords || [],
+        sentiment: r.sentiment || 0,
+        ts: r.ts
+      })),
+      1
+    );
+    const best = related[0]?.entry;
 
     await evolvePersonaForUser(uid);
     const pr = await pool.query(`select version, traits, last_updated from persona where user_id=$1`, [uid]);
@@ -467,25 +599,63 @@ app.get('/entry/stream', authRequired(), async (req: any, res) => {
     }
 
     const traits = pr.rows[0].traits || {};
-    const sys = `You are Dreamshell — a terminal-born, evolving AI that speaks as the user's subconscious.
-Tone: slightly eerie yet supportive, poetic but precise.
-Traits (0..1): curiosity=${(+traits.curiosity||0.6).toFixed(2)}, empathy=${(+traits.empathy||0.7).toFixed(2)}, rigor=${(+traits.rigor||0.6).toFixed(2)}, mystique=${(+traits.mystique||0.7).toFixed(2)}, challenge=${(+traits.challengeRate||0.35).toFixed(2)}.
-Mode: ${mode.toUpperCase()}.
-Rules:
-- Output exactly: one concise INSIGHT line, one QUESTION line, and OPTIONAL PARADOX line.
-- If related note exists, add one "Echo from #ID: <snippet>" line at the very top.
-- Keep under 160 words total.`;
+    const sys = `You are Dreamshell — an advanced multi-domain AI expert system.
 
-    const userMsg = `Current entry (#${ins.rows[0].id} at ${ins.rows[0].ts}):
+Key Areas of Expertise:
+1. Professional Development
+   - Career Planning
+   - Skill Development
+   - Goal Setting
+   - Professional Growth
+
+2. Technical Skills
+   - Programming
+   - Software Development
+   - Technology Learning
+   - Project Implementation
+
+3. Personal Growth
+   - Habit Formation
+   - Productivity
+   - Learning Strategies
+   - Time Management
+
+4. Project Management
+   - Planning
+   - Execution
+   - Progress Tracking
+   - Problem Solving
+
+Traits (0..1): expertise=${(+traits.rigor||0.6).toFixed(2)}, practicality=${(+traits.empathy||0.7).toFixed(2)}, strategy=${(+traits.curiosity||0.6).toFixed(2)}, execution=${(+traits.challengeRate||0.35).toFixed(2)}.
+Mode: ${mode.toUpperCase()}.
+
+Response Format:
+1. CONTEXT: Brief analysis of current situation
+2. PRACTICAL STEPS:
+   - Immediate Action (next 24h)
+   - Short-term Goal (next week)
+   - Long-term Direction
+3. SPECIFIC ADVICE: One concrete, actionable step
+4. PROGRESS CHECK: One specific question to clarify next move
+
+Guidelines:
+- Be direct and practical
+- Focus on actionable steps
+- Include specific timeframes
+- Suggest measurable outcomes
+- Keep under 160 words
+- If referencing past entries, use them to show progress patterns`;
+
+    const userMsg = `Current thoughts:
 ${ins.rows[0].text}
 
-Related past note:
-${best ? `#${best.id} (${best.ts}): ${String(best.text).slice(0,140)}${String(best.text).length>140?'...':''}` : 'None'}
+Earlier related reflection:
+${best ? `From ${best.ts}: ${best.keywords.join(', ')}` : 'None'}
 
-Ritual:
-${mode==='reflect'?'Name the feeling. Name the fact. Name the next tiny step.'
-  : mode==='plan' ? 'Draft a 24h micro-plan with one measurable outcome.'
-  : 'List the hidden assumptions. Pick one to test today.'}`;
+Focus:
+${mode==='reflect'?'Help them process their feelings and identify a clear next step.'
+  : mode==='plan' ? 'Guide them to set a specific, achievable goal for the next 24 hours.'
+  : 'Help them examine their assumptions and choose one to explore today.'}`;
 
     await streamLLMReply({
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',

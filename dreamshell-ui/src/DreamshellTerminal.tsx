@@ -56,15 +56,37 @@ type Persona = {
   lastUpdated: string;
 };
 
+type EmotionTag = {
+  name: string;
+  intensity: number; // 1-5
+  color: string;
+};
+
+type EntryCategory = {
+  name: string;
+  icon: string;
+};
+
+type DailyMood = {
+  date: string;
+  morning?: number;
+  afternoon?: number;
+  evening?: number;
+  notes?: string;
+};
+
 type Entry = {
   id: number;
   timestamp: string;
   text: string;
   keywords: string[];
   sentiment: number; // -1..1
+  emotions?: EmotionTag[];
+  category?: string;
+  dailyMood?: DailyMood;
 };
 
-type Mode = "reflect" | "plan" | "untangle";
+type Mode = "reflect" | "plan" | "untangle" | "vent" | "journal";
 
 /* =========== Fallback/local helpers kept for UX =========== */
 const STOP = new Set([
@@ -122,9 +144,15 @@ function related(entries: Entry[], text: string, limit = 3) {
     .map(s => s.e);
 }
 function localReply(persona: Persona, current: Entry, rel: Entry[], mode: Mode) {
+  const ventResponses = [
+    "I hear how overwhelming this feels. Take your time to express everything that's on your mind.",
+    "It sounds like you're carrying a lot right now. I'm here to listen.",
+    "Those feelings are valid. Would you like to tell me more about what's weighing on you?",
+  ];
+
   const insightChoices = [
-    "Memory isn’t linear—today braided into an older thread you keep tugging.",
-    "You’re orbiting a choice; a gentle delta-v would change everything.",
+    "Memory isn't linear—today braided into an older thread you keep tugging.",
+    "You're orbiting a choice; a gentle delta-v would change everything.",
     "Attention is your only real currency; you spent it wisely in one place and bled it in another.",
   ];
   const questionChoices = [
@@ -144,13 +172,111 @@ function localReply(persona: Persona, current: Entry, rel: Entry[], mode: Mode) 
     : mode === 'plan'
       ? 'Draft a 24h micro-plan with one measurable outcome.'
       : 'List the hidden assumptions; test one today.';
-  const lines = [ref + pick(insightChoices), pick(questionChoices)];
-  if (Math.random() < persona.traits.challengeRate) lines.push(pick(paradoxChoices));
-  lines.push(`\nRitual → ${ritual}`);
+  let lines: string[] = [];
+  
+  if (mode === 'vent') {
+    lines = [pick(ventResponses)];
+  } else {
+    lines = [ref + pick(insightChoices), pick(questionChoices)];
+    if (Math.random() < persona.traits.challengeRate) {
+      lines.push(pick(paradoxChoices));
+    }
+  }
+  
+  if (mode !== 'vent') {
+    lines.push(`\nRitual → ${ritual}`);
+  }
   return lines.join("\n\n");
 }
 
 /* ===================== UI bits ===================== */
+const EMOTIONS = {
+  joy: { name: 'Joy', color: 'bg-yellow-400' },
+  gratitude: { name: 'Gratitude', color: 'bg-green-400' },
+  peace: { name: 'Peace', color: 'bg-blue-400' },
+  anxiety: { name: 'Anxiety', color: 'bg-purple-400' },
+  sadness: { name: 'Sadness', color: 'bg-blue-600' },
+  frustration: { name: 'Frustration', color: 'bg-red-400' },
+  hope: { name: 'Hope', color: 'bg-cyan-400' },
+  fear: { name: 'Fear', color: 'bg-gray-400' },
+  excitement: { name: 'Excitement', color: 'bg-orange-400' },
+  love: { name: 'Love', color: 'bg-pink-400' },
+} as const;
+
+const CATEGORIES = {
+  personal: { name: 'Personal', icon: '👤' },
+  work: { name: 'Work', icon: '💼' },
+  health: { name: 'Health', icon: '🌱' },
+  relationships: { name: 'Relationships', icon: '❤️' },
+  goals: { name: 'Goals', icon: '🎯' },
+  creativity: { name: 'Creativity', icon: '✨' },
+  learning: { name: 'Learning', icon: '📚' },
+  challenges: { name: 'Challenges', icon: '🏋️' },
+} as const;
+
+const PROMPTS = {
+  vent: [
+    "What's weighing on your mind right now?",
+    "How are you really feeling in this moment?",
+    "What's the hardest part about what you're going through?",
+    "What do you wish others understood about your situation?",
+  ],
+  journal: {
+    morning: [
+      "What's one thing you're looking forward to today?",
+      "How did you sleep? How does your body feel?",
+      "What's your intention for today?",
+      "What would make today great?",
+    ],
+    evening: [
+      "What made you smile today?",
+      "What challenged you today and what did you learn?",
+      "What are you grateful for right now?",
+      "How did your mood shift throughout the day?",
+    ],
+    reflection: [
+      "What patterns have you noticed in your thoughts lately?",
+      "What's something you've been avoiding thinking about?",
+      "Where do you feel stuck, and what might help?",
+      "What small progress are you proud of?",
+    ],
+  },
+  reflect: [
+    "What recurring patterns do you notice in your life lately?",
+    "What beliefs or assumptions might be holding you back?",
+    "What small changes could make the biggest difference?",
+    "What would your future self thank you for starting today?",
+  ],
+  plan: [
+    "What's the next small step you could take?",
+    "What resources or support do you need to move forward?",
+    "What would success look like for this goal?",
+    "What potential obstacles might you encounter?",
+  ],
+  untangle: [
+    "What different perspectives could you consider?",
+    "What assumptions are you making about each option?",
+    "What would you advise a friend in this situation?",
+    "What's the core value or need driving this decision?",
+  ],
+} as const;
+
+function getMoodLabel(s: number) {
+  if (s > 0.5) return "Positive";
+  if (s > 0) return "Slightly Positive";
+  if (s > -0.5) return "Neutral";
+  if (s > -1) return "Slightly Concerned";
+  return "Need Support";
+}
+
+function getMoodColor(s: number) {
+  if (s > 0.5) return "bg-emerald-500";
+  if (s > 0) return "bg-blue-400";
+  if (s > -0.5) return "bg-gray-400";
+  if (s > -1) return "bg-amber-400";
+  return "bg-rose-400";
+}
+
 const traitMeta: { key: keyof Traits; label: string; icon: LucideIcon }[] = [
   { key: 'curiosity', label: 'Curiosity', icon: HelpCircle },
   { key: 'empathy', label: 'Empathy', icon: HelpingHand },
@@ -176,11 +302,126 @@ function ModePill({ m, active, onClick }: { m: Mode; active: boolean; onClick: (
   );
 }
 
+function EmotionTag({ emotion, intensity, onSelect }: { 
+  emotion: keyof typeof EMOTIONS; 
+  intensity?: number; 
+  onSelect?: (intensity: number) => void;
+}) {
+  return (
+    <div className="inline-flex items-center gap-1">
+      <button 
+        className={`px-2 py-0.5 rounded-full text-xs ${EMOTIONS[emotion].color} text-white/90 
+          ${intensity ? 'opacity-100' : 'opacity-60 hover:opacity-80'}`}
+        onClick={() => onSelect?.(intensity ? 0 : 3)}
+      >
+        {EMOTIONS[emotion].name}
+        {intensity && <span className="ml-1">{'•'.repeat(intensity)}</span>}
+      </button>
+    </div>
+  );
+}
+
+function DailyMoodTracker({ date, mood, onChange }: { 
+  date: string; 
+  mood?: DailyMood; 
+  onChange?: (mood: DailyMood) => void;
+}) {
+  const periods = ['morning', 'afternoon', 'evening'] as const;
+  
+  return (
+    <div className="p-4 rounded-xl border border-white/10 bg-black/20">
+      <h3 className="text-sm font-medium mb-3">Daily Check-in</h3>
+      <div className="space-y-3">
+        {periods.map(period => (
+          <div key={period} className="space-y-1">
+            <div className="flex justify-between text-xs">
+              <span className="capitalize">{period}</span>
+              {mood?.[period] && (
+                <span className="opacity-70">{getMoodLabel(mood[period]!)}</span>
+              )}
+            </div>
+            <input
+              type="range"
+              min="-1"
+              max="1"
+              step="0.1"
+              value={mood?.[period] || 0}
+              onChange={e => onChange?.({ 
+                ...mood, 
+                date, 
+                [period]: parseFloat(e.target.value) 
+              })}
+              className="w-full accent-white/70"
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function JournalPrompt({ mode, timeOfDay }: { 
+  mode: Mode; 
+  timeOfDay?: 'morning' | 'evening' | 'reflection';
+}) {
+  const [prompt, setPrompt] = useState(() => {
+    const prompts = mode === 'journal' && timeOfDay 
+      ? PROMPTS.journal[timeOfDay]
+      : PROMPTS[mode];
+    return Array.isArray(prompts) 
+      ? prompts[Math.floor(Math.random() * prompts.length)]
+      : prompts.morning[0];
+  });
+
+  return (
+    <div className="text-sm opacity-80 italic mb-2">
+      "{prompt}"
+    </div>
+  );
+}
+
+function EmotionSummary({ entries }: { entries: Entry[] }) {
+  const today = new Date();
+  const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+  
+  const weeklyEntries = entries.filter(e => new Date(e.timestamp) >= weekAgo);
+  const avgSentiment = weeklyEntries.length > 0
+    ? weeklyEntries.reduce((sum, e) => sum + e.sentiment, 0) / weeklyEntries.length
+    : 0;
+
+  // Using shared mood label and color functions
+
+  return (
+    <div className="p-4 rounded-xl border border-white/10 bg-black/20">
+      <h3 className="text-sm font-medium mb-3">Weekly Reflection</h3>
+      <div className="space-y-3">
+        <div>
+          <div className="flex justify-between text-xs mb-1">
+            <span>Overall Mood</span>
+            <span>{getMoodLabel(avgSentiment)}</span>
+          </div>
+          <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
+            <div 
+              className={`h-full ${getMoodColor(avgSentiment)} transition-all duration-500`} 
+              style={{ width: `${Math.round((avgSentiment + 1) * 50)}%` }} 
+            />
+          </div>
+        </div>
+        <div className="flex justify-between text-xs opacity-70">
+          <span>Past Week</span>
+          <span>{weeklyEntries.length} entries</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ===================== Component ===================== */
 export default function DreamshellTerminal() {
   const [mode, setMode] = useState<Mode>("reflect");
   const [input, setInput] = useState("");
   const [log, setLog] = useState<{ role: 'user'|'shell'; text: string; id: string }[]>([]);
+  const [currentEmotions, setCurrentEmotions] = useState<EmotionTag[]>([]);
 
   const [state, setState] = useState<{ entries: Entry[]; persona: Persona; nextId: number }>(() => ({
     entries: [],
@@ -303,9 +544,14 @@ export default function DreamshellTerminal() {
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-zinc-900 via-black to-zinc-950 text-white flex">
       {/* Left rail: Persona */}
-      <aside className="hidden md:flex md:flex-col gap-4 w-72 p-4 border-r border-white/10">
+            <aside className="hidden md:flex md:flex-col gap-4 w-72 p-4 border-r border-white/10">
         <div className="flex items-center gap-2 opacity-80"><Terminal size={18}/> <span className="tracking-widest">DREAMSHELL</span></div>
         <div className="text-xs opacity-60">v0.2 · {new Date(persona.lastUpdated).toLocaleString()}</div>
+        
+        {state.entries.length > 0 && (
+          <EmotionSummary entries={state.entries} />
+        )}
+
         <div className="mt-2 space-y-3">
           {traitMeta.map(({ key, label, icon:Icon }) => (
             <div key={key}>
@@ -318,7 +564,13 @@ export default function DreamshellTerminal() {
           ))}
         </div>
         <div className="mt-6 text-xs opacity-70 leading-relaxed">
-          <p>“I speak as your inner orbit—poetic but precise. Choose a mode; I will answer with an insight, a question, and sometimes a paradox.”</p>
+          <p>{
+            mode === 'vent' 
+              ? "This is a safe space. Express yourself freely without judgment. I'm here to listen."
+              : mode === 'journal'
+                ? "Write your thoughts, feelings, and experiences. I'll help you reflect on patterns and growth."
+                : "I speak as your inner orbit—poetic but precise. Choose a mode; I will answer with an insight, a question, and sometimes a paradox."
+          }</p>
         </div>
       </aside>
 
@@ -330,7 +582,7 @@ export default function DreamshellTerminal() {
             <span className="font-semibold">Dreamshell · Terminal Interface</span>
           </div>
           <div className="flex items-center gap-2">
-            {(["reflect","plan","untangle"] as Mode[]).map(m => (
+            {(["vent", "journal", "reflect", "plan", "untangle"] as Mode[]).map(m => (
               <ModePill key={m} m={m} active={m===mode} onClick={()=>setMode(m)} />
             ))}
             <button
@@ -349,6 +601,31 @@ export default function DreamshellTerminal() {
                   bg-[radial-gradient(1200px_600px_at_50%_-10%,rgba(255,255,255,0.08),transparent)]
                   bg-gradient-to-b from-zinc-900/30 via-zinc-900/10 to-transparent
                   border border-white/10">
+            
+            {mode === 'journal' && (
+              <div className="p-4 border-b border-white/10">
+                <JournalPrompt 
+                  mode={mode}
+                  timeOfDay={
+                    mode === 'journal'
+                      ? (new Date().getHours() < 12 ? 'morning' 
+                        : new Date().getHours() < 18 ? 'evening' 
+                        : 'reflection')
+                      : undefined
+                  }
+                />
+                <DailyMoodTracker 
+                  date={new Date().toISOString().split('T')[0]}
+                  mood={state.entries[0]?.dailyMood}
+                  onChange={(mood) => {
+                    if (state.entries[0]) {
+                      const entry = {...state.entries[0], dailyMood: mood};
+                      setState(s => ({...s, entries: [entry, ...s.entries.slice(1)]}));
+                    }
+                  }}
+                />
+              </div>
+            )}
             <AnimatePresence initial={false}>
               {log.map(item => (
                 <motion.div
@@ -371,23 +648,60 @@ export default function DreamshellTerminal() {
         <footer className="p-4 border-t border-white/10">
           <div className="max-w-3xl mx-auto">
             <div className="flex gap-2">
-              <textarea
-                value={input}
-                onChange={e=>setInput(e.target.value)}
-                className="flex-1 bg-black/60 border border-white/15 rounded-2xl p-3 outline-none focus:ring-2 focus:ring-white/30 font-mono text-sm min-h-[80px]"
-                autoFocus
-                onKeyDown={(e)=>{
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        submitEntry();
-                    }
-                }}
-                placeholder="Type your entry. Press Enter to send, Shift+Enter for newline."
-              />
+              <div className="flex-1 space-y-2">
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {Object.keys(EMOTIONS).map(emotion => (
+                    <EmotionTag 
+                      key={emotion}
+                      emotion={emotion as keyof typeof EMOTIONS}
+                      intensity={currentEmotions?.find(e => e.name === EMOTIONS[emotion as keyof typeof EMOTIONS].name)?.intensity}
+                      onSelect={(intensity) => {
+                        const newEmotions = [...(currentEmotions || [])];
+                        const index = newEmotions.findIndex(e => e.name === EMOTIONS[emotion as keyof typeof EMOTIONS].name);
+                        if (index >= 0) {
+                          if (intensity === 0) {
+                            newEmotions.splice(index, 1);
+                          } else {
+                            newEmotions[index].intensity = intensity;
+                          }
+                        } else if (intensity > 0) {
+                          newEmotions.push({
+                            name: EMOTIONS[emotion as keyof typeof EMOTIONS].name,
+                            intensity,
+                            color: EMOTIONS[emotion as keyof typeof EMOTIONS].color
+                          });
+                        }
+                        setCurrentEmotions(newEmotions);
+                      }}
+                    />
+                  ))}
+                </div>
+                <textarea
+                  value={input}
+                  onChange={e=>setInput(e.target.value)}
+                  className="w-full bg-black/60 border border-white/15 rounded-2xl p-3 outline-none focus:ring-2 focus:ring-white/30 font-mono text-sm min-h-[80px]"
+                  autoFocus
+                  onKeyDown={(e)=>{
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          submitEntry();
+                      }
+                  }}
+                  placeholder={
+                    mode === 'vent' 
+                      ? "Express yourself freely. This is a safe space."
+                      : mode === 'journal'
+                        ? "Write about your day, thoughts, or feelings..."
+                        : "Type your entry. Press Enter to send, Shift+Enter for newline."
+                  }
+                />
+              </div>
               <button
                 onClick={submitEntry}
                 className="px-4 py-3 rounded-2xl border border-white/20 bg-white/10 hover:bg-white/20 transition"
-              >Send</button>
+              >
+                Send
+              </button>
             </div>
             <div className="text-xs opacity-60 mt-2">Entries are stored locally in your browser. Persona adapts with every note.</div>
           </div>
