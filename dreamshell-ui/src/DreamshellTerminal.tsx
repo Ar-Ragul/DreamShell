@@ -364,13 +364,13 @@ function JournalPrompt({ mode, timeOfDay }: {
   mode: Mode; 
   timeOfDay?: 'morning' | 'evening' | 'reflection';
 }) {
-  const [prompt, setPrompt] = useState(() => {
+  const [prompt] = useState(() => {
     const prompts = mode === 'journal' && timeOfDay 
-      ? PROMPTS.journal[timeOfDay]
+      ? PROMPTS.journal[timeOfDay as keyof typeof PROMPTS.journal]
       : PROMPTS[mode];
     return Array.isArray(prompts) 
       ? prompts[Math.floor(Math.random() * prompts.length)]
-      : prompts.morning[0];
+      : PROMPTS.journal.morning[0];
   });
 
   return (

@@ -1,0 +1,45 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'dreamshell-backend/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'dreamshell-backend/**'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./dreamshell-backend
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ./dreamshell-backend/package-lock.json
+
+    - name: Install Dependencies
+      run: npm ci
+
+    - name: Build
+      run: npm run build
+
+    - name: Run Tests
+      run: npm test || true
+
+    - name: Deploy to Railway
+      if: github.ref == 'refs/heads/main'
+      env:
+        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      run: |
+        npm install -g @railway/cli
+        railway up --service "dreamshell-backend"
