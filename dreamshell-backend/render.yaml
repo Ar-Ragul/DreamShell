@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: dreamshell-backend
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        value: postgresql://neondb_owner:npg_YMBE09tgJybc@ep-square-king-a17ufqbj-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+      - key: JWT_SECRET
+        value: super-secret-32+chars
+      - key: PORT
+        value: 3000

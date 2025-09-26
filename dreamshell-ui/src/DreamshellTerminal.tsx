@@ -541,6 +541,33 @@ export default function DreamshellTerminal() {
     location.reload(); // simplest to reset auth + refetch guarded data
   };
 
+  const [isBackendReady, setBackendReady] = useState(false);
+
+  useEffect(() => {
+    // Check if backend is ready
+    fetch(`${API_BASE}/ping/health`)
+      .then(() => setBackendReady(true))
+      .catch(() => {
+        // If backend is cold, show warming up message and retry
+        setTimeout(() => {
+          fetch(`${API_BASE}/ping/health`)
+            .then(() => setBackendReady(true));
+        }, 10000);
+      });
+  }, []);
+
+  if (!isBackendReady) {
+    return (
+      <div className="min-h-screen w-full bg-gradient-to-b from-zinc-900 via-black to-zinc-950 text-white flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-white mx-auto"></div>
+          <div className="text-lg">Warming up the Dreamshell...</div>
+          <div className="text-sm opacity-70">This might take up to a minute</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-zinc-900 via-black to-zinc-950 text-white flex">
       {/* Left rail: Persona */}
