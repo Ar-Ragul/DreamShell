@@ -5,7 +5,7 @@ import { Pool } from 'pg';
 import {
   issueToken, authRequired, hashPassword, verifyPassword,
   makeToken, sendMail, ensurePersonaFor
-} from './auth';
+} from './auth.js';
 
 const app = express();
 app.use(cors());
